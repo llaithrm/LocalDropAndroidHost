@@ -32,7 +32,7 @@ class HostService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startHost()
-            ACTION_STOP -> { stopCapture(); server?.stop(); server = null; stopForeground(true); stopSelf() }
+            ACTION_STOP -> { isRunning = false; stopCapture(); server?.stop(); server = null; stopForeground(true); stopSelf() }
             ACTION_CAPTURE -> {
                 val code = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
                 val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
@@ -50,6 +50,7 @@ class HostService : Service() {
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
             .setOngoing(true).build()
         startForeground(7, notification)
+        isRunning = true
         if (server == null) {
             try { server = HostHttpServer(this, latestJpeg).also { it.start() } }
             catch (e: Exception) { stopSelf() }
@@ -64,10 +65,15 @@ class HostService : Service() {
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(metrics)
-            val w = metrics.widthPixels
-            val h = metrics.heightPixels
+            val realW = metrics.widthPixels
+            val realH = metrics.heightPixels
             val density = metrics.densityDpi
-            reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+
+            // Scale to max 720p width for fast, fluid remote mirroring without OOM
+            val targetW = if (realW > 720) 720 else realW
+            val targetH = (realH * (targetW.toFloat() / realW)).toInt()
+
+            reader = ImageReader.newInstance(targetW, targetH, PixelFormat.RGBA_8888, 2)
             reader?.setOnImageAvailableListener({ r ->
                 captureExecutor.execute {
                     var image: android.media.Image? = null
@@ -76,12 +82,12 @@ class HostService : Service() {
                         val plane = image.planes[0]
                         val pixelStride = plane.pixelStride
                         val rowStride = plane.rowStride
-                        val rowPadding = rowStride - pixelStride * w
-                        val padded = Bitmap.createBitmap(w + rowPadding / pixelStride, h, Bitmap.Config.ARGB_8888)
+                        val rowPadding = rowStride - pixelStride * targetW
+                        val padded = Bitmap.createBitmap(targetW + rowPadding / pixelStride, targetH, Bitmap.Config.ARGB_8888)
                         padded.copyPixelsFromBuffer(plane.buffer)
-                        val bitmap = Bitmap.createBitmap(padded, 0, 0, w, h)
+                        val bitmap = Bitmap.createBitmap(padded, 0, 0, targetW, targetH)
                         val out = ByteArrayOutputStream()
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 55, out)
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 60, out)
                         latestJpeg.set(out.toByteArray())
                         padded.recycle(); bitmap.recycle()
                     } catch (_: Exception) {
@@ -89,17 +95,19 @@ class HostService : Service() {
                 }
             }, null)
             display = projection?.createVirtualDisplay(
-                "LocalDropScreen", w, h, density,
+                "LocalDropScreen", targetW, targetH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader?.surface, null, null
             )
             projection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() { stopCapture() }
             }, null)
+            isCapturing = true
         } catch (_: Exception) { stopCapture() }
     }
 
     private fun stopCapture() {
+        isCapturing = false
         try { display?.release() } catch (_: Exception) {}
         display = null
         try { reader?.close() } catch (_: Exception) {}
@@ -117,6 +125,7 @@ class HostService : Service() {
     }
 
     override fun onDestroy() {
+        isRunning = false
         stopCapture()
         server?.stop()
         captureExecutor.shutdownNow()
@@ -124,6 +133,8 @@ class HostService : Service() {
     }
 
     companion object {
+        @Volatile var isRunning = false
+        @Volatile var isCapturing = false
         const val ACTION_START = "host.start"
         const val ACTION_STOP = "host.stop"
         const val ACTION_CAPTURE = "host.capture"
