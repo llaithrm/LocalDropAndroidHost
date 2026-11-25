@@ -10,6 +10,9 @@ import android.view.accessibility.AccessibilityNodeInfo
 
 class RemoteAccessibilityService : AccessibilityService() {
 
+    private var cursorX = 0.5f
+    private var cursorY = 0.5f
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
@@ -23,11 +26,13 @@ class RemoteAccessibilityService : AccessibilityService() {
     }
 
     fun tap(nx: Float, ny: Float, screenW: Int, screenH: Int): Boolean {
-        val x = nx.coerceIn(0f, 1f) * screenW
-        val y = ny.coerceIn(0f, 1f) * screenH
+        cursorX = nx.coerceIn(0f, 1f)
+        cursorY = ny.coerceIn(0f, 1f)
+        val x = cursorX * screenW
+        val y = cursorY * screenH
         val path = Path().apply {
             moveTo(x, y)
-            lineTo(x, y + 1f) // Ensure path has non-zero length so Android dispatchGesture won't cancel it
+            lineTo(x, y + 1f)
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, 50)
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
@@ -40,6 +45,32 @@ class RemoteAccessibilityService : AccessibilityService() {
         }
         val stroke = GestureDescription.StrokeDescription(path, 0, duration.coerceIn(50, 1500))
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+    }
+
+    // Smart TV D-Pad Navigation (Simulates clean swipes in 4 directions)
+    fun dpad(direction: String, screenW: Int, screenH: Int): Boolean {
+        val cx = 0.5f * screenW
+        val cy = 0.5f * screenH
+        val step = 0.15f * Math.min(screenW, screenH)
+
+        val (x1, y1, x2, y2) = when (direction) {
+            "up" -> listOf(cx, cy + step, cx, cy - step)
+            "down" -> listOf(cx, cy - step, cx, cy + step)
+            "left" -> listOf(cx + step, cy, cx - step, cy)
+            "right" -> listOf(cx - step, cy, cx + step, cy)
+            else -> return false
+        }
+
+        val path = Path().apply {
+            moveTo(x1, y1)
+            lineTo(x2, y2)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+        return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
+    }
+
+    fun dpadCenter(screenW: Int, screenH: Int): Boolean {
+        return tap(cursorX, cursorY, screenW, screenH)
     }
 
     fun performGlobal(action: String): Boolean {

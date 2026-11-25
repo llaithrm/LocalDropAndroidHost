@@ -1,21 +1,26 @@
 package com.localdrop.host
 
 import android.app.*
-import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioManager
 import android.media.ImageReader
+import android.media.MediaPlayer
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.DisplayMetrics
+import android.view.KeyEvent
 import android.view.WindowManager
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -27,12 +32,31 @@ class HostService : Service() {
     private val latestJpeg = AtomicReference<ByteArray?>(null)
     private val captureExecutor = Executors.newSingleThreadExecutor()
 
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var audioManager: AudioManager? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        acquireLocks()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startHost()
-            ACTION_STOP -> { isRunning = false; stopCapture(); server?.stop(); server = null; stopForeground(true); stopSelf() }
+            ACTION_STOP -> {
+                isRunning = false
+                stopCapture()
+                server?.stop()
+                server = null
+                releaseLocks()
+                stopForeground(true)
+                stopSelf()
+            }
             ACTION_CAPTURE -> {
                 val code = intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
                 val data = intent.getParcelableExtra<Intent>(EXTRA_RESULT_DATA)
@@ -42,18 +66,52 @@ class HostService : Service() {
         return START_STICKY
     }
 
+    private fun acquireLocks() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LocalDrop::TVHostWakeLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LocalDrop::TVHostWifiLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseLocks() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
+    }
+
     private fun startHost() {
         createChannel()
         val notification = Notification.Builder(this, CHANNEL)
-            .setContentTitle("LocalDrop Host يعمل")
-            .setContentText("السيرفر المحلي يستقبل اتصالات الشبكة")
+            .setContentTitle("LocalDrop Smart TV Hub")
+            .setContentText("محرك التحكم والتلفاز يعمل بنشاط في الخلفية")
             .setSmallIcon(android.R.drawable.stat_sys_upload_done)
-            .setOngoing(true).build()
+            .setOngoing(true)
+            .build()
         startForeground(7, notification)
         isRunning = true
+
         if (server == null) {
-            try { server = HostHttpServer(this, latestJpeg).also { it.start() } }
-            catch (e: Exception) { stopSelf() }
+            try {
+                server = HostHttpServer(this, latestJpeg).also { it.start() }
+            } catch (e: Exception) {
+                // Retry in 2 seconds if port is temporarily occupied
+                captureExecutor.execute {
+                    Thread.sleep(2000)
+                    try {
+                        server = HostHttpServer(this, latestJpeg).also { it.start() }
+                    } catch (_: Exception) {}
+                }
+            }
         }
     }
 
@@ -69,7 +127,7 @@ class HostService : Service() {
             val realH = metrics.heightPixels
             val density = metrics.densityDpi
 
-            // Scale to max 720p width for fast, fluid remote mirroring without OOM
+            // Scale to max 720p width for fast, fluid TV mirroring
             val targetW = if (realW > 720) 720 else realW
             val targetH = (realH * (targetW.toFloat() / realW)).toInt()
 
@@ -94,6 +152,7 @@ class HostService : Service() {
                     } finally { image?.close() }
                 }
             }, null)
+
             display = projection?.createVirtualDisplay(
                 "LocalDropScreen", targetW, targetH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -117,10 +176,38 @@ class HostService : Service() {
         latestJpeg.set(null)
     }
 
+    // Audio & TV Volume Control
+    fun adjustVolume(direction: String) {
+        val am = audioManager ?: return
+        when (direction) {
+            "vol_up" -> am.adjustSuggestedStreamVolume(AudioManager.ADJUST_RAISE, AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI)
+            "vol_down" -> am.adjustSuggestedStreamVolume(AudioManager.ADJUST_LOWER, AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI)
+            "vol_mute" -> am.adjustSuggestedStreamVolume(AudioManager.ADJUST_TOGGLE_MUTE, AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI)
+            "play_pause" -> {
+                val down = KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                val up = KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+                am.dispatchMediaKeyEvent(down)
+                am.dispatchMediaKeyEvent(up)
+            }
+        }
+    }
+
+    // Play Voice Note directly through TV/HDMI Speakers
+    fun playVoiceAudio(file: File) {
+        try {
+            val mp = MediaPlayer().apply {
+                setDataSource(file.absolutePath)
+                prepare()
+                start()
+                setOnCompletionListener { it.release() }
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "LocalDrop Host", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "LocalDrop TV Hub", NotificationManager.IMPORTANCE_LOW))
         }
     }
 
@@ -128,11 +215,14 @@ class HostService : Service() {
         isRunning = false
         stopCapture()
         server?.stop()
+        releaseLocks()
         captureExecutor.shutdownNow()
+        instance = null
         super.onDestroy()
     }
 
     companion object {
+        @Volatile var instance: HostService? = null
         @Volatile var isRunning = false
         @Volatile var isCapturing = false
         const val ACTION_START = "host.start"
@@ -140,11 +230,15 @@ class HostService : Service() {
         const val ACTION_CAPTURE = "host.capture"
         const val EXTRA_RESULT_CODE = "resultCode"
         const val EXTRA_RESULT_DATA = "resultData"
-        const val CHANNEL = "localdrop_host"
+        const val CHANNEL = "localdrop_tv_hub"
+
         fun getPin(ctx: Context): String {
             val p = ctx.getSharedPreferences("host", Context.MODE_PRIVATE)
             var pin = p.getString("pin", null)
-            if (pin == null) { pin = (100000..999999).random().toString(); p.edit().putString("pin", pin).apply() }
+            if (pin == null) {
+                pin = (100000..999999).random().toString()
+                p.edit().putString("pin", pin).apply()
+            }
             return pin
         }
     }
