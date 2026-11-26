@@ -1,8 +1,8 @@
-name: Build LocalDrop Android APK
+name: Build LocalDrop Pro APKs
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "feature/android-tv-client" ]
   workflow_dispatch:
 
 permissions:
@@ -31,17 +31,16 @@ jobs:
         with:
           packages: "platform-tools platforms;android-34 build-tools;34.0.0"
 
-      - name: Build debug APK
-        run: |
-          if [ -d "LocalDropAndroidHost_cloud_build/LocalDropAndroidHost" ]; then
-            cd LocalDropAndroidHost_cloud_build/LocalDropAndroidHost
-          fi
-          gradle --no-daemon assembleDebug
+      - name: Build Host and Android TV APKs
+        working-directory: LocalDropAndroidHost_cloud_build/LocalDropAndroidHost
+        run: gradle --no-daemon assembleDebug
 
-      - name: Upload APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: LocalDropAndroidHost-debug-apk
-          path: "**/app/build/outputs/apk/debug/*.apk"
+          name: LocalDrop-Pro-APKs
+          path: |
+            LocalDropAndroidHost_cloud_build/LocalDropAndroidHost/app/build/outputs/apk/debug/*.apk
+            LocalDropAndroidHost_cloud_build/LocalDropAndroidHost/tv/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
