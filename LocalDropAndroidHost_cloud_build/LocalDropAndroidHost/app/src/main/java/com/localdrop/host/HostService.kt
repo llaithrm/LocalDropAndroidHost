@@ -13,6 +13,8 @@ import android.media.MediaPlayer
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.net.wifi.WifiManager
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -35,6 +37,8 @@ class HostService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var audioManager: AudioManager? = null
+    private var nsdManager: NsdManager? = null
+    private var nsdRegistration: NsdManager.RegistrationListener? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,6 +46,7 @@ class HostService : Service() {
         super.onCreate()
         instance = this
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
         acquireLocks()
     }
 
@@ -51,6 +56,7 @@ class HostService : Service() {
             ACTION_STOP -> {
                 isRunning = false
                 stopCapture()
+                unregisterDiscovery()
                 server?.stop()
                 server = null
                 releaseLocks()
@@ -103,16 +109,44 @@ class HostService : Service() {
         if (server == null) {
             try {
                 server = HostHttpServer(this, latestJpeg).also { it.start() }
+                registerDiscovery()
             } catch (e: Exception) {
                 // Retry in 2 seconds if port is temporarily occupied
                 captureExecutor.execute {
                     Thread.sleep(2000)
                     try {
                         server = HostHttpServer(this, latestJpeg).also { it.start() }
+                        registerDiscovery()
                     } catch (_: Exception) {}
                 }
             }
         }
+    }
+
+
+    private fun registerDiscovery() {
+        if (nsdRegistration != null) return
+        try {
+            val info = NsdServiceInfo().apply {
+                serviceName = "LocalDrop-${Build.MODEL.replace(Regex("[^A-Za-z0-9_-]"), "")}"
+                serviceType = "_http._tcp."
+                port = 8765
+                setAttribute("protocol", "localdrop-v1")
+            }
+            val listener = object : NsdManager.RegistrationListener {
+                override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {}
+                override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { nsdRegistration = null }
+                override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {}
+                override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) { nsdRegistration = null }
+            }
+            nsdRegistration = listener
+            nsdManager?.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (_: Exception) { nsdRegistration = null }
+    }
+
+    private fun unregisterDiscovery() {
+        try { nsdRegistration?.let { nsdManager?.unregisterService(it) } } catch (_: Exception) {}
+        nsdRegistration = null
     }
 
     private fun startCapture(code: Int, data: Intent) {
@@ -214,6 +248,7 @@ class HostService : Service() {
     override fun onDestroy() {
         isRunning = false
         stopCapture()
+        unregisterDiscovery()
         server?.stop()
         releaseLocks()
         captureExecutor.shutdownNow()
