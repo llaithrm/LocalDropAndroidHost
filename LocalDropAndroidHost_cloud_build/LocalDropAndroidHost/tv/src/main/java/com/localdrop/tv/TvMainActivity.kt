@@ -7,6 +7,8 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -219,6 +221,10 @@ class TvMainActivity : Activity() {
             try {
                 val response = request("GET", "/api/media", null)
                 if (response.first !in 200..299) throw IOException("PIN أو عنوان المضيف غير صحيح")
+                val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "tv-${System.currentTimeMillis()}"
+                val device = JSONObject().put("id", deviceId).put("name", "Android TV ${Build.MODEL}")
+                val registration = request("POST", "/api/device/register", device.toString().toByteArray(Charsets.UTF_8))
+                if (registration.first !in 200..299) throw IOException("تم الاتصال لكن تعذر تسجيل التلفاز")
                 connected = true
                 runOnUiThread {
                     status.text = "متصل بالمضيف $host"
