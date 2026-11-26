@@ -20,8 +20,7 @@ class HostHttpServer(
 
     private val mediaDir = File(ctx.getExternalFilesDir(null), "TV_Media").apply { mkdirs() }
     private val voiceDir = File(ctx.getExternalFilesDir(null), "TV_Voice").apply { mkdirs() }
-    private val chat = mutableListOf<JSONObject>()
-    private var msgId = 0
+    private val database = HostDatabase(ctx)
 
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
@@ -76,6 +75,8 @@ class HostHttpServer(
             "/api/media" -> handleMedia(session)
             "/api/voice" -> handleVoice(session)
             "/api/chat" -> handleChat(session)
+            "/api/device/register" -> handleDeviceRegister(session)
+            "/api/devices" -> json(JSONObject().put("devices", database.getDevices()))
             else -> newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not found")
         }
     }
@@ -220,25 +221,32 @@ class HostHttpServer(
     private fun handleChat(s: IHTTPSession): Response {
         return try {
             if (s.method == Method.GET) {
-                val arr = JSONArray()
-                synchronized(chat) { chat.forEach { arr.put(it) } }
-                json(JSONObject().put("messages", arr))
+                json(JSONObject().put("messages", database.getMessages()))
             } else {
                 val o = JSONObject(body(s))
-                val from = o.optString("from", "ريموت")
+                val from = o.optString("from", "جهاز محلي")
                 val text = o.optString("text").take(4000)
-                val msg = JSONObject().put("id", ++msgId).put("from", from)
-                    .put("text", text)
-                    .put("time", SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()))
-                synchronized(chat) {
-                    chat.add(msg)
-                    if (chat.size > 200) chat.removeAt(0)
-                }
+                if (text.isBlank()) return json(JSONObject().put("error", "empty_message"), Response.Status.BAD_REQUEST)
+                val msg = database.addMessage(from, text)
                 MainActivity.instance?.showTvNotification("💬 $from: $text")
                 json(JSONObject().put("ok", true).put("message", msg))
             }
-        } catch (_: Exception) {
-            json(JSONObject().put("error", "bad_request"), Response.Status.BAD_REQUEST)
+        } catch (e: Exception) {
+            json(JSONObject().put("error", e.message ?: "bad_request"), Response.Status.BAD_REQUEST)
+        }
+    }
+
+    private fun handleDeviceRegister(s: IHTTPSession): Response {
+        return try {
+            val o = JSONObject(body(s))
+            val id = o.optString("id").trim()
+            val name = o.optString("name", "Android TV").trim()
+            if (id.isBlank()) return json(JSONObject().put("error", "device_id_required"), Response.Status.BAD_REQUEST)
+            val ip = s.remoteIpAddress ?: ""
+            val device = database.registerDevice(id, name, ip)
+            json(JSONObject().put("ok", true).put("device", device))
+        } catch (e: Exception) {
+            json(JSONObject().put("ok", false).put("error", e.message ?: "bad_request"), Response.Status.BAD_REQUEST)
         }
     }
 
